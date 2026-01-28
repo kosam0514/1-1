@@ -79,33 +79,6 @@ const RESPONSE_SCHEMA = {
   required: ["speaker", "dialogue", "narrative", "mood", "imageId", "background", "timestamp", "chapter", "chapterTitle", "choices", "affectionScore", "isGameOver"],
 };
 
-// Retry Helper
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function withRetry<T>(operation: () => Promise<T>, retries = 3, backoff = 2000): Promise<T> {
-  try {
-    return await operation();
-  } catch (error: any) {
-    // Check for rate limit (429) or service unavailable (503) or generic quota messages
-    const isQuotaError = 
-      error?.status === 429 || 
-      error?.code === 429 || 
-      error?.status === 503 ||
-      (error?.message && (
-        error.message.includes('429') || 
-        error.message.includes('quota') || 
-        error.message.includes('RESOURCE_EXHAUSTED')
-      ));
-      
-    if (retries > 0 && isQuotaError) {
-      console.warn(`API Quota hit or Rate Limit. Retrying in ${backoff}ms... (${retries} retries left)`);
-      await wait(backoff);
-      return withRetry(operation, retries - 1, backoff * 2);
-    }
-    throw error;
-  }
-}
-
 const initChatWithContext = async (prompt: string) => {
   chatSession = ai.chats.create({
     model: 'gemini-3-flash-preview',
@@ -116,8 +89,11 @@ const initChatWithContext = async (prompt: string) => {
     },
   });
   
-  // Apply retry logic to initialization
-  await withRetry(() => chatSession!.sendMessage({ message: `[SYSTEM SETUP]: ${prompt}` }));
+  try {
+     await chatSession.sendMessage({ message: `[SYSTEM SETUP]: ${prompt}` });
+  } catch (e) {
+    console.error("Failed to init context", e);
+  }
 };
 
 export const startGame = async (playerName: string): Promise<GameScene> => {
@@ -200,21 +176,7 @@ export const startFromCheckpoint = async (data: CheckpointData): Promise<GameSce
 
 export const sendChoice = async (choice: string): Promise<GameScene> => {
   if (!chatSession) {
-    // If chat session is lost (e.g. page refresh without persistence logic), try to soft reset or show error
-    return {
-      speaker: "System",
-      dialogue: "세션 연결이 끊겼습니다. 페이지를 새로고침 해주세요.",
-      narrative: "Session Lost",
-      mood: CharacterMood.SAD,
-      imageId: 1,
-      background: BackgroundType.SCHOOL,
-      timestamp: "Error",
-      chapter: 1,
-      chapterTitle: "Connection Error",
-      choices: ["새로고침"], // Clicking this will likely just loop unless logic changes, but serves as info
-      affectionScore: 0,
-      isGameOver: false // Keep game alive to show message
-    };
+    throw new Error("Game not started");
   }
 
   let prompt = `Player chose: "${choice}". `;
@@ -237,8 +199,7 @@ export const sendChoice = async (choice: string): Promise<GameScene> => {
   }
 
   try {
-    // Apply retry logic to sendChoice
-    const result = await withRetry(() => chatSession!.sendMessage({ message: prompt }));
+    const result = await chatSession.sendMessage({ message: prompt });
     if (!result.text) throw new Error("No response text");
     
     const parsed = JSON.parse(result.text) as GameScene;
@@ -254,26 +215,19 @@ export const sendChoice = async (choice: string): Promise<GameScene> => {
     }
     
     return parsed;
-  } catch (error: any) {
+  } catch (error) {
     console.error("Gemini Error:", error);
-    
-    // Check for Quota/Rate Limit specifically to give better feedback
-    const isQuota = error?.status === 429 || error?.message?.includes('429') || error?.message?.includes('quota');
-    const msg = isQuota 
-      ? "서버 접속량이 많아 응답이 지연되고 있습니다. 잠시 후 아래 '다시 시도' 버튼을 눌러주세요." 
-      : "일시적인 오류가 발생했습니다. 다시 시도해주세요.";
-
     return {
       speaker: "System",
-      dialogue: msg,
-      narrative: "Connection Error",
-      mood: CharacterMood.SAD,
-      imageId: 1, // Fallback image
-      background: BackgroundType.SCHOOL, // Fallback background
-      timestamp: "System",
+      dialogue: "Connection Error. Please try again.",
+      narrative: "Error...",
+      mood: CharacterMood.SURPRISED,
+      imageId: 1,
+      background: BackgroundType.FANTASY,
+      timestamp: "Error",
       chapter: 1,
       chapterTitle: "Error",
-      choices: ["다시 시도"], // The user can click this to try sending the choice again
+      choices: ["Retry"],
       affectionScore: 0,
       isGameOver: false
     };
